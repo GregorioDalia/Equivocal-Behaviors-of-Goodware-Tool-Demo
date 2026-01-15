@@ -96,12 +96,8 @@ def load_eb_rules(resources_dir: Path | None = None) -> List[EBRule]:
 # Feature extraction (dal normalized)
 # -------------------------
 
-def extract_mitre_set_from_normalized(normalized: Dict[str, Any]) -> Set[str]:
-    """
-    Dal normalized report estrae tutte le technique IDs presenti come observations:
-      { "type": "mitre", "name": "technique", "value": "T1059", ... }
-    """
-    out: Set[str] = set()
+def extract_mitre_by_source_from_normalized(normalized: Dict[str, Any]) -> Dict[str, Set[str]]:
+    out: Dict[str, Set[str]] = {"virustotal": set(), "hybridanalysis": set()}
     obs = normalized.get("observations")
     if not isinstance(obs, list):
         return out
@@ -109,15 +105,17 @@ def extract_mitre_set_from_normalized(normalized: Dict[str, Any]) -> Set[str]:
     for o in obs:
         if not isinstance(o, dict):
             continue
-        if o.get("type") != "mitre":
-            continue
-        if o.get("name") != "technique":
+        if o.get("type") != "mitre" or o.get("name") != "technique":
             continue
         v = o.get("value")
-        if isinstance(v, str) and v.strip():
-            out.add(v.strip().upper())
+        src = o.get("source")
+        if isinstance(v, str) and v.strip() and isinstance(src, str):
+            s = src.strip().lower()
+            if s in out:
+                out[s].add(v.strip().upper())
 
     return out
+
 
 
 # -------------------------
@@ -128,34 +126,45 @@ def match_equivocal_behaviours(
     normalized: Dict[str, Any],
     rules: List[EBRule],
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """
-    Ritorna:
-      - lista di EB observations (presenti)
-      - lista di EB observations (assenti) [opzionale, al momento vuota per semplicità]
-    """
-    mitre_set = extract_mitre_set_from_normalized(normalized)
+
+    mitre_by_src = extract_mitre_by_source_from_normalized(normalized)
+    mitre_vt = mitre_by_src.get("virustotal", set())
+    mitre_ha = mitre_by_src.get("hybridanalysis", set())
 
     present: List[Dict[str, Any]] = []
     absent: List[Dict[str, Any]] = []
 
     for r in rules:
-        matched = sorted(mitre_set.intersection(r.mitre_any))
-        if matched:
+        matched_vt = sorted(mitre_vt.intersection(r.mitre_any))
+        matched_ha = sorted(mitre_ha.intersection(r.mitre_any))
+
+        if matched_vt or matched_ha:
+            sources_triggered = []
+            if matched_ha:
+                sources_triggered.append("hybridanalysis")
+            if matched_vt:
+                sources_triggered.append("virustotal")
+
             present.append({
                 "type": "equivocal_behaviour",
                 "category": "eb",
-                "name": r.eb_code,                 # codice ESB1/ESB2...
+                "name": r.eb_code,
                 "value": True,
                 "source": "toolbehave",
                 "severity": "info",
                 "meta": {
                     "eb_name": r.eb_name,
                     "match_mode": "any",
-                    "matched_mitre": matched,
+                    "matched_mitre": {
+                        "hybridanalysis": matched_ha,
+                        "virustotal": matched_vt,
+                    },
+                    "sources_triggered": sources_triggered,
                 }
             })
 
     return present, absent
+
 
 
 def enrich_normalized_with_eb(
