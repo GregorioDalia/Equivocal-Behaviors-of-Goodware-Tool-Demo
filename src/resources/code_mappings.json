@@ -1,0 +1,14 @@
+{
+        "System Analysis and Resource Discovery":"ESB1",
+        "Network Enumeration and Analysis":"ESB2",
+        "Network Traffic Manipulation and Covert Communications":"ESB3",
+        "Scripting and Code Execution":"ESB4",
+        "Task Scheduling and System Automation":"ESB5",
+        "Advanced OS Utility Exploitation":"ESB6",
+        "Privilege Manipulation": "ESB7",
+        "Software Extension and Interaction":"ESB8",
+        "Control Evasion and Analysis Avoidance":"ESB9",
+        "Logging Evasion and Indirect Software Execution":"ESB10",
+        "Encryption Manipulation":"ESB11",
+        "Media Capture":"ESB12"
+}

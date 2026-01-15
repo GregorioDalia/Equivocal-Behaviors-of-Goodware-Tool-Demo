@@ -1,0 +1,87 @@
+{
+  "System Analysis and Resource Discovery": [
+    "T1592",
+    "T1217",
+    "T1003",
+    "T1010",
+    "T1652",
+    "T1615",
+    "T1654",
+    "T1057",
+    "T1082",
+    "T1614",
+    "T1033",
+    "T1007",
+    "T1124",
+    "T1083"
+  ],
+  "Network Enumeration and Analysis": [
+    "T1590",
+    "T1040",
+    "T1135",
+    "T1016",
+    "T1049"
+  ],
+  "Network Traffic Manipulation and Covert Communications": [
+    "T1205",
+    "T1187",
+    "T1558",
+    "T1572"
+  ],
+  "Scripting and Code Execution": [
+    "T1059",
+    "T1559",
+    "T1136",
+    "T1543",
+    "T1570",
+    "T1021",
+    "T1569",
+    "T1220"
+  ],
+  "Task Scheduling and System Automation": [
+    "T1053",
+    "T1542",
+    "T1546",
+    "T1480"
+  ],
+  "Advanced OS Utility Exploitation": [
+    "T1129",
+    "T1047",
+    "T1197",
+    "T1012",
+    "T1018",
+    "T1105"
+  ],
+  "Privilege Manipulation": [
+    "T1098",
+    "T1556",
+    "T1134"
+  ],
+  "Software Extension and Interaction": [
+    "T1176",
+    "T1570",
+    "T1105",
+    "T1219"
+  ],
+  "Control Evasion and Analysis Avoidance": [
+    "T1622",
+    "T1140",
+    "T1006",
+    "T1564",
+    "T1497",
+    "T1518",
+    "T1132"
+  ],
+  "Logging Evasion and Indirect Software Execution": [
+    "T1070",
+    "T1202"
+  ],
+  "Encryption Manipulation": [
+    "T1600"
+  ],
+  "Media Capture": [
+    "T1123",
+    "T1113",
+    "T1125"
+  ]
+}
