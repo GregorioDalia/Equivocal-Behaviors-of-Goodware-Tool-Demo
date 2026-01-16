@@ -198,3 +198,41 @@ def enrich_normalized_with_eb(
 
     out["observations"] = obs
     return out
+def build_eb_summary(enriched: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Estrae SOLO le observation di tipo equivocal_behaviour dall'enriched report e
+    costruisce un JSON compatto per reportistica/triage.
+    """
+    sha = enriched.get("sha256", "unknown")
+    obs = enriched.get("observations")
+    if not isinstance(obs, list):
+        obs = []
+
+    eb_list = []
+    for o in obs:
+        if not isinstance(o, dict):
+            continue
+        if o.get("type") != "equivocal_behaviour":
+            continue
+
+        meta = o.get("meta") if isinstance(o.get("meta"), dict) else {}
+        eb_list.append({
+            "code": o.get("name"),
+            "name": meta.get("eb_name"),
+            "sources_triggered": meta.get("sources_triggered", []),
+            "matched_mitre": meta.get("matched_mitre", {"hybridanalysis": [], "virustotal": []}),
+        })
+
+    # ordine stabile per diff / confronti
+    eb_list.sort(key=lambda x: (str(x.get("code") or ""), str(x.get("name") or "")))
+
+    return {
+        "sha256": sha,
+        "equivocal_behaviours": eb_list,
+        "counts": {
+            "total": len(eb_list),
+            "hybridanalysis": sum(1 for e in eb_list if "hybridanalysis" in (e.get("sources_triggered") or [])),
+            "virustotal": sum(1 for e in eb_list if "virustotal" in (e.get("sources_triggered") or [])),
+            "both": sum(1 for e in eb_list if set(e.get("sources_triggered") or []) == {"hybridanalysis", "virustotal"}),
+        }
+    }
