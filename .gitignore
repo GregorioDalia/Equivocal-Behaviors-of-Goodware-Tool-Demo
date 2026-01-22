@@ -15,3 +15,6 @@ __pycache__/
 
 # SQLite
 *.sqlite3
+
+# Local sample binaries (never commit)
+samples/
