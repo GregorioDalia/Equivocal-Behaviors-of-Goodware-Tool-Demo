@@ -796,23 +796,73 @@ def eb_stats(
             raise typer.Exit(code=0)
 
         colnames = ["HybridAnalysis", "VirusTotal"]
-        matrix_rows = []
-        for code in single_all_codes:
-            srcs = present.get(code, set())
-            matrix_rows.append(["X" if "hybridanalysis" in srcs else "", "X" if "virustotal" in srcs else ""])
+        # --- Build row codes for the PNG matrix ---
+        # Always include ESB canonici
+        row_codes = list(esb_codes)
 
-        plt.rcParams.update({"font.size": 10, "axes.titlesize": 12})
-        fig, ax = plt.subplots(figsize=(6, max(4, 0.35 * len(single_all_codes))), dpi=160)
+        # Add requirements codes found in the eb_<sha>.json (robust even if --requirements not passed to eb-stats)
+        req_codes_in_file = []
+        for r_ in reqs:
+            if isinstance(r_, dict):
+                c = r_.get("code")
+                if isinstance(c, str) and c.strip():
+                    req_codes_in_file.append(c.strip())
+
+        # keep order: R1, R2, ...
+        def _rkey(c: str):
+            import re
+            m = re.search(r"(\d+)$", c)
+            return int(m.group(1)) if m else 10 ** 9
+
+        req_codes_in_file = sorted(set(req_codes_in_file), key=_rkey)
+
+        row_codes.extend(req_codes_in_file)
+
+        # --- Build matrix rows using row_codes ---
+        matrix_rows = []
+        for code in row_codes:
+            srcs = present.get(code, set())
+            matrix_rows.append([
+                "X" if "hybridanalysis" in srcs else "",
+                "X" if "virustotal" in srcs else "",
+            ])
+
+        # --- Render table ---
+        fig, ax = plt.subplots(figsize=(6, max(4, 0.35 * len(row_codes))), dpi=160)
         ax.axis("off")
 
         tbl = ax.table(
             cellText=matrix_rows,
-            rowLabels=single_all_codes,
+            rowLabels=row_codes,
+            colLabels=["HybridAnalysis", "VirusTotal"],
+            cellLoc="center",
+            rowLoc="center",
+            loc="center",
+        )
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(10)
+        tbl.scale(1.0, 1.2)
+
+        ax.set_title(f"EB/Requirements presence matrix - {target[:10]}", pad=12)
+
+        out_png = single_dir / "single_presence_matrix.png"
+        plt.tight_layout()
+        plt.savefig(out_png, bbox_inches="tight")
+        plt.close()
+
+        plt.rcParams.update({"font.size": 10, "axes.titlesize": 12})
+        fig, ax = plt.subplots(figsize=(6, max(4, 0.35 * len(row_codes))), dpi=160)
+        ax.axis("off")
+
+        tbl = ax.table(
+            cellText=matrix_rows,
+            rowLabels=row_codes,  # <-- FIX: labels must match matrix_rows
             colLabels=colnames,
             cellLoc="center",
             rowLoc="center",
             loc="center",
         )
+
         tbl.auto_set_font_size(False)
         tbl.set_fontsize(10)
         tbl.scale(1.0, 1.2)
