@@ -254,22 +254,22 @@ def eb_all(
 
         try:
             normalized = json.loads(p.read_text(encoding="utf-8"))
-            enriched = enrich_normalized_with_eb(normalized, eb_rules, req_rules)
-
-            # Write enriched (unless exists and not force)
-            if force or not enriched_path.exists():
-                enriched_path.write_text(json.dumps(enriched, indent=2), encoding="utf-8")
-                generated_enriched += 1
-
-            eb_summary = build_eb_summary(enriched)
 
             schema_meta = {"enabled": False}
             if requirements:
                 schema_meta = _requirements_fingerprint(requirements)
 
+            enriched = enrich_normalized_with_eb(normalized, eb_rules, req_rules)
+            eb_summary = build_eb_summary(enriched)
+
+            # IMPORTANT: add schema metadata BEFORE writing files
             enriched["requirements_schema"] = schema_meta
             eb_summary["requirements_schema"] = schema_meta
 
+            # Write enriched (unless exists and not force)
+            if force or not enriched_path.exists():
+                enriched_path.write_text(json.dumps(enriched, indent=2), encoding="utf-8")
+                generated_enriched += 1
 
             # Write eb synth (unless exists and not force)
             if force or not eb_path.exists():

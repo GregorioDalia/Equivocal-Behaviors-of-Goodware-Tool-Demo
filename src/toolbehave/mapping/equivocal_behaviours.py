@@ -60,7 +60,48 @@ def _to_tech_set(techniques: Any) -> Set[str]:
             out.add(t.strip().upper())
     return out
 
+def _technique_with_parent(technique: str) -> Set[str]:
+    """
+    Return the observed MITRE technique together with its parent technique.
 
+    Example:
+      T1059.001 -> {"T1059.001", "T1059"}
+      T1059     -> {"T1059"}
+
+    This allows a rule defined on a parent technique, e.g. T1059,
+    to match a more specific observed sub-technique, e.g. T1059.001.
+    """
+    t = technique.strip().upper()
+    if not t:
+        return set()
+
+    out = {t}
+
+    if "." in t:
+        parent = t.split(".", 1)[0].strip()
+        if parent:
+            out.add(parent)
+
+    return out
+
+
+def _matched_observed_techniques(observed: Set[str], rule_techniques: Set[str]) -> List[str]:
+    """
+    Match observed MITRE techniques against rule techniques.
+
+    The output keeps the observed technique IDs, not the expanded parent IDs.
+    Example:
+      observed={"T1059.001"}, rule_techniques={"T1059"}
+      -> ["T1059.001"]
+    """
+    matched: List[str] = []
+
+    for technique in observed:
+        expanded = _technique_with_parent(technique)
+        if expanded.intersection(rule_techniques):
+            matched.append(technique)
+
+    return sorted(matched)
 # -------------------------
 # Loaders (standard EB)
 # -------------------------
@@ -192,8 +233,8 @@ def match_equivocal_behaviours(
     present: List[Dict[str, Any]] = []
 
     for r in rules:
-        matched_vt = sorted(mitre_vt.intersection(r.mitre_any))
-        matched_ha = sorted(mitre_ha.intersection(r.mitre_any))
+        matched_vt = _matched_observed_techniques(mitre_vt, r.mitre_any)
+        matched_ha = _matched_observed_techniques(mitre_ha, r.mitre_any)
 
         if not (matched_vt or matched_ha):
             continue
@@ -240,8 +281,8 @@ def match_requirements(
     present: List[Dict[str, Any]] = []
 
     for r in rules:
-        matched_vt = sorted(mitre_vt.intersection(r.mitre_any))
-        matched_ha = sorted(mitre_ha.intersection(r.mitre_any))
+        matched_vt = _matched_observed_techniques(mitre_vt, r.mitre_any)
+        matched_ha = _matched_observed_techniques(mitre_ha, r.mitre_any)
 
         if not (matched_vt or matched_ha):
             continue
