@@ -12,55 +12,56 @@ class Orchestrator:
         self.ha = ha
     def detect_ha_environment_id(self, file_path: str) -> int:
         """
-        Select the Hybrid Analysis environment ID according to the input file type.
+        Select the Hybrid Analysis environment ID according to the file extension.
 
-        PE     -> Windows 11 64 bit      -> 140
-        ELF    -> Linux Ubuntu 24.04     -> 330
-        Mach-O -> macOS Tahoe ARM64      -> 430
+        Windows PE-like files -> Windows 11 64 bit      -> 140
+        ELF/Linux files       -> Linux Ubuntu 24.04     -> 330
+        macOS files           -> macOS Tahoe ARM64      -> 430
         """
-        path = Path(file_path)
+        suffix = Path(file_path).suffix.lower()
 
-        if not path.is_file():
-            raise FileNotFoundError(f"Input file not found: {path}")
-
-        with path.open("rb") as f:
-            header = f.read(4)
-
-        # ELF
-        if header == b"\x7fELF":
-            return 330
-
-        # Mach-O / Universal binary
-        macho_magics = {
-            b"\xfe\xed\xfa\xce",
-            b"\xce\xfa\xed\xfe",
-            b"\xfe\xed\xfa\xcf",
-            b"\xcf\xfa\xed\xfe",
-            b"\xca\xfe\xba\xbe",
-            b"\xbe\xba\xfe\xca",
-            b"\xca\xfe\xba\xbf",
-            b"\xbf\xba\xfe\xca",
+        windows_extensions = {
+            ".exe",
+            ".dll",
+            ".sys",
+            ".scr",
+            ".ocx",
+            ".cpl",
+            ".drv",
+            ".efi",
+            ".msi",
         }
 
-        if header in macho_magics:
+        linux_extensions = {
+            ".elf",
+            ".so",
+            ".bin",
+            ".run",
+            ".out",
+        }
+
+        macos_extensions = {
+            ".macho",
+            ".dylib",
+            ".app",
+            ".pkg",
+            ".dmg",
+        }
+
+        if suffix in windows_extensions:
+            print("[DEBUG] Selected HA environment_id=140 for Windows/PE extension", flush=True)
+            return 140
+
+        if suffix in linux_extensions:
+            print("[DEBUG] Selected HA environment_id=330 for Linux/ELF extension", flush=True)
+            return 330
+
+        if suffix in macos_extensions:
+            print("[DEBUG] Selected HA environment_id=430 for macOS extension", flush=True)
             return 430
 
-        # PE: starts with MZ, then PE signature at offset stored at 0x3C
-        if header[:2] == b"MZ":
-            with path.open("rb") as f:
-                f.seek(0x3C)
-                offset_bytes = f.read(4)
-
-                if len(offset_bytes) == 4:
-                    pe_offset = int.from_bytes(offset_bytes, byteorder="little", signed=False)
-                    f.seek(pe_offset)
-                    pe_signature = f.read(4)
-
-                    if pe_signature == b"PE\x00\x00":
-                        return 140
-
         raise ValueError(
-            f"Unsupported file type for Hybrid Analysis environment selection: {path}"
+            f"Unsupported file extension for Hybrid Analysis environment selection: {suffix or '[no extension]'}"
         )
 
     async def submit(self, file_path: str) -> None:
@@ -82,8 +83,8 @@ class Orchestrator:
             Service.HYBRIDANALYSIS.value,
             ha_res["external_id"],
             ha_res["status"],
+            environment_id=ha_environment_id,
         )
-
     async def poll_once(self, sha256: str) -> None:
         vt_row = self.db.get_submission(sha256, Service.VIRUSTOTAL.value)
         if vt_row:

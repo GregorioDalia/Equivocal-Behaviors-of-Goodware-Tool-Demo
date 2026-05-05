@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   sha256 TEXT NOT NULL,
   service TEXT NOT NULL,
   external_id TEXT NOT NULL,
+  environment_id INTEGER,
   status TEXT NOT NULL,
   error TEXT,
   created_at TEXT DEFAULT (datetime('now')),
@@ -51,12 +52,27 @@ class DB:
                 (sha256, file_path),
             )
 
-    def upsert_submission(self, sha256: str, service: str, external_id: str, status: str, error: Optional[str]=None) -> None:
+    def upsert_submission(
+            self,
+            sha256: str,
+            service: str,
+            external_id: str,
+            status: str,
+            error: Optional[str] = None,
+            environment_id: Optional[int] = None,
+    ) -> None:
         with self._conn() as c:
             c.execute(
-                "INSERT INTO submissions(sha256, service, external_id, status, error) VALUES(?, ?, ?, ?, ?) "
-                "ON CONFLICT(sha256, service) DO UPDATE SET external_id=excluded.external_id, status=excluded.status, error=excluded.error",
-                (sha256, service, external_id, status, error),
+                """
+                INSERT INTO submissions(sha256, service, external_id, environment_id, status, error)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sha256, service) DO UPDATE SET
+                    external_id = excluded.external_id,
+                    environment_id = excluded.environment_id,
+                    status = excluded.status,
+                    error = excluded.error
+                """,
+                (sha256, service, external_id, environment_id, status, error),
             )
 
     def update_status(self, sha256: str, service: str, status: str, error: Optional[str]=None) -> None:

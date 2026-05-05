@@ -24,6 +24,7 @@ class HybridAnalysisClient:
         }
 
     async def submit_file(self, file_path: str, environment_id: int = 160) -> Dict[str, Any]:
+        print(f"[DEBUG] HybridAnalysisClient.submit_file received environment_id={environment_id}", flush=True)
         sha = sha256_file(file_path)
         async with httpx.AsyncClient(timeout=120) as client:
             with open(file_path, "rb") as f:

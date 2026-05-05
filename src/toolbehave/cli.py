@@ -47,7 +47,10 @@ def list_cmd():
     orch = build_orchestrator()
     rows = orch.db.list_submissions()
     for r in rows:
-        typer.echo(f"{r['sha256']} | {r['service']} | {r['status']} | {r['external_id']}")
+        env = r["environment_id"] if r["environment_id"] is not None else "-"
+        typer.echo(
+            f"{r['sha256']} | {r['service']} | env={env} | {r['status']} | {r['external_id']}"
+        )
 
 @app.command()
 def poll(sha256: str):
@@ -82,7 +85,10 @@ def watch(interval: int = 60):
             rows = orch.db.list_submissions()
             typer.echo("---- status ----")
             for r in rows:
-                typer.echo(f"{r['sha256']} | {r['service']} | {r['status']} | {r['external_id']}")
+                env = r["environment_id"] if r["environment_id"] is not None else "-"
+                typer.echo(
+                    f"{r['sha256']} | {r['service']} | env={env} | {r['status']} | {r['external_id']}"
+                )
             time.sleep(interval)
     except KeyboardInterrupt:
         typer.echo("Stopped.")
