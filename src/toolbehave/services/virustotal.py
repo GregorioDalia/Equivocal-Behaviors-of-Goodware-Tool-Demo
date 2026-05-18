@@ -1,7 +1,7 @@
 import hashlib
-import httpx
+from pathlib import Path
 from typing import Any, Dict
-
+import httpx
 VT_API = "https://www.virustotal.com/api/v3"
 
 def sha256_file(path: str) -> str:
@@ -18,7 +18,8 @@ class VirusTotalClient:
     def _headers(self) -> Dict[str, str]:
         return {"x-apikey": self.api_key}
 
-    async def submit_file(self, file_path: str) -> Dict[str, Any]:
+    '''
+        #async def submit_file(self, file_path: str) -> Dict[str, Any]:
         sha = sha256_file(file_path)
         async with httpx.AsyncClient(timeout=60) as client:
             with open(file_path, "rb") as f:
@@ -28,6 +29,54 @@ class VirusTotalClient:
             data = r.json()
         external_id = data["data"]["id"]  # analysis id
         return {"sha256": sha, "external_id": external_id, "status": "SUBMITTED"}
+    '''
+
+
+    async def submit_file(self, file_path: str) -> Dict[str, Any]:
+        sha = sha256_file(file_path)
+        path = Path(file_path)
+        file_size = path.stat().st_size
+
+        async with httpx.AsyncClient(timeout=300) as client:
+            upload_url = f"{VT_API}/files"
+
+            # VirusTotal standard /files endpoint accepts files up to 32 MB.
+            # Larger files require a one-time upload URL.
+            if file_size > 32 * 1024 * 1024:
+                print(
+                    f"[INFO] VirusTotal file size is {file_size / (1024 * 1024):.2f} MB. "
+                    "Requesting large-file upload URL.",
+                    flush=True,
+                )
+
+                upload_url_response = await client.get(
+                    f"{VT_API}/files/upload_url",
+                    headers=self._headers(),
+                )
+                upload_url_response.raise_for_status()
+
+                upload_url = upload_url_response.json()["data"]
+
+            with path.open("rb") as f:
+                files = {"file": (path.name, f)}
+
+                r = await client.post(
+                    upload_url,
+                    headers=self._headers(),
+                    files=files,
+                )
+
+            r.raise_for_status()
+            data = r.json()
+
+        external_id = data["data"]["id"]
+
+        return {
+            "sha256": sha,
+            "external_id": external_id,
+            "status": "SUBMITTED",
+            "raw": data,
+        }
 
     async def poll_status(self, sha256: str, external_id: str) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=30) as client:

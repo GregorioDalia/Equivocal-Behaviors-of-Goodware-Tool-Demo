@@ -1,6 +1,8 @@
 import hashlib
 import httpx
 from typing import Any, Dict
+from pathlib import Path
+
 
 HA_API = "https://hybrid-analysis.com/api/v2"
 
@@ -23,12 +25,12 @@ class HybridAnalysisClient:
             "user-agent": self.user_agent,
         }
 
-    async def submit_file(self, file_path: str, environment_id: int = 160) -> Dict[str, Any]:
+    async def submit_file(self, file_path: str, environment_id: int = 140) -> Dict[str, Any]:
         print(f"[DEBUG] HybridAnalysisClient.submit_file received environment_id={environment_id}", flush=True)
         sha = sha256_file(file_path)
         async with httpx.AsyncClient(timeout=120) as client:
             with open(file_path, "rb") as f:
-                files = {"file": (file_path, f)}
+                files = {"file": (Path(file_path).name, f)}
                 data = {
                     "environment_id": str(environment_id),
                     "allow_community_access": "true",

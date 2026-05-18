@@ -109,3 +109,4 @@ class DB:
             ).fetchall()
             return [r["sha256"] for r in rows]
 
+

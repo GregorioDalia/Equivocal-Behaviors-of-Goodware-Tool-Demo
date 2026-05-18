@@ -27,6 +27,29 @@ def _stage_file(reports_dir: Path, stage: str, sha: str) -> Path:
     _ensure_dir(d)
     return d / f"{stage}_{sha}.json"
 
+def _row_get(row, key: str, default=None):
+    """
+    Safe getter for sqlite3.Row or dict-like rows.
+    Useful because older DBs may not have newer columns such as environment_id.
+    """
+    try:
+        return row[key]
+    except Exception:
+        if isinstance(row, dict):
+            return row.get(key, default)
+        return default
+
+def _format_submission_row(row) -> str:
+    sha = _row_get(row, "sha256", "-")
+    service = _row_get(row, "service", "-")
+    status = _row_get(row, "status", "-")
+    external_id = _row_get(row, "external_id", "-")
+    environment_id = _row_get(row, "environment_id", None)
+
+    env = environment_id if environment_id is not None else "-"
+
+    return f"{sha} | {service} | env={env} | {status} | {external_id}"
+
 def build_orchestrator() -> Orchestrator:
     s = get_settings()
     db = DB(s.db_path)
@@ -35,22 +58,40 @@ def build_orchestrator() -> Orchestrator:
     return Orchestrator(db=db, vt=vt, ha=ha)
 
 @app.command()
-def submit(path: str):
-    """Submit a file to VirusTotal + Hybrid Analysis."""
+def submit(
+    path: str,
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Force resubmission even if the sample already exists in the DB.",
+    ),
+):
+    """
+    Submit a file to VirusTotal + Hybrid Analysis.
+
+    Default behavior:
+      - reuse existing VT/HA submissions from the DB when available;
+      - submit only missing/stale providers.
+
+    With --force:
+      - resubmit to both providers and update the DB.
+    """
     orch = build_orchestrator()
-    asyncio.run(orch.submit(path))
-    typer.echo("Submitted to VT + HA.")
+    asyncio.run(orch.submit(path, force=force))
+    typer.echo("Submit/resume step completed.")
 
 @app.command("list")
 def list_cmd():
     """List submissions."""
     orch = build_orchestrator()
     rows = orch.db.list_submissions()
+
+    if not rows:
+        typer.echo("No submissions found.")
+        raise typer.Exit(code=0)
+
     for r in rows:
-        env = r["environment_id"] if r["environment_id"] is not None else "-"
-        typer.echo(
-            f"{r['sha256']} | {r['service']} | env={env} | {r['status']} | {r['external_id']}"
-        )
+        typer.echo(_format_submission_row(r))
 
 @app.command()
 def poll(sha256: str):
@@ -78,20 +119,26 @@ def watch(interval: int = 60):
     """Continuously poll status for ALL submissions every N seconds (Ctrl+C to stop)."""
     orch = build_orchestrator()
     typer.echo(f"Watching submissions. Polling every {interval}s. Press Ctrl+C to stop.")
+
     try:
         while True:
             asyncio.run(orch.poll_all_once())
-            # mostra lo stato dopo ogni giro
+
             rows = orch.db.list_submissions()
             typer.echo("---- status ----")
-            for r in rows:
-                env = r["environment_id"] if r["environment_id"] is not None else "-"
-                typer.echo(
-                    f"{r['sha256']} | {r['service']} | env={env} | {r['status']} | {r['external_id']}"
-                )
+
+            if not rows:
+                typer.echo("No submissions found.")
+            else:
+                for r in rows:
+                    typer.echo(_format_submission_row(r))
+
             time.sleep(interval)
+
     except KeyboardInterrupt:
         typer.echo("Stopped.")
+
+
 @app.command("report-all")
 def report_all(
     out_dir: str = "reports",
@@ -203,7 +250,7 @@ def eb_all(
     requirements: str = typer.Option(
         "",
         "--requirements",
-        help="Optional custom requirements JSON (same structure as Comportamenti_Equivoci.json).",
+        help="Optional custom requirements JSON (same structure as Equivocal_Behaviours.json).",
     ),
 ):
     """
@@ -557,41 +604,62 @@ def _requirements_fingerprint(requirements_path: str) -> dict:
         "count": _count_requirements_entries(p),  # see helper below
     }
 
-
-
 @app.command("eb-stats")
 def eb_stats(
-    reports_dir: str = "reports",
-    sha=typer.Option(None, "--sha", help="Filter subset by repeating: --sha <sha> --sha <sha> ..."),
-    sha_list: str = typer.Option("", "--sha-list", help="Path to a text file with one sha256 per line (subset)."),
-    sha_single: str = typer.Option("", "--sha-single", help="Single-sample mode for this sha256."),
-    requirements: str = typer.Option("", "--requirements", help="Optional custom requirements JSON (used to FILTER to a specific schema in aggregate mode)."),
+    reports_dir: str = typer.Option("reports", "--reports-dir", help="Base reports directory."),
+    by_os: bool = typer.Option(
+        False,
+        "--by-os",
+        help="Also generate aggregate EB statistics grouped by target operating system.",
+    ),
+    sha: list[str] | None = typer.Option(
+        None,
+        "--sha",
+        help="Filter subset by repeating: --sha <sha> --sha <sha> ...",
+    ),
+    sha_list: str = typer.Option(
+        "",
+        "--sha-list",
+        help="Path to a text file with one sha256 per line (subset).",
+    ),
+    sha_single: str = typer.Option(
+        "",
+        "--sha-single",
+        help="Single-sample mode for this sha256.",
+    ),
+    requirements: str = typer.Option(
+        "",
+        "--requirements",
+        help="Optional custom requirements JSON used to filter to a specific schema in aggregate mode.",
+    ),
 ):
     """
     EB statistics.
 
-    Aggregate (Soluzione A - schema isolation):
-      - ALWAYS writes ESB-only plots into:
+    Aggregate:
+      - always writes ESB-only plots into:
           reports/plots/aggregate/<scope>/all/
-            eb_hist_pct.png, eb_hist_counts.png
-            eb_agreement_pct.png, eb_agreement_counts.png
-        (percent denominators = number of samples in current scope)
 
-      - Requirements plots are written ONLY when schema is coherent:
-          * For FULL dataset (no subset filters): one folder per schema found.
-          * For SUBSET (via --sha / --sha-list):
-                requirements plots are generated ONLY if all samples in subset share the same requirements schema
-                (enabled + same sha256). Otherwise: warning, skip requirements plots.
+      - with --by-os, also writes OS-specific aggregate plots into:
+          reports/plots/aggregate/by_os/<os>/all/
 
-      - Titles always include: n=<sample_count>
+      - requirements plots are written only when the requirements schema is coherent.
+
+    Single-sample mode:
+      - writes single-sample table and matrix into:
+          reports/plots/single/<sha-prefix>/
     """
     import builtins
+    import csv
     import json
     import re
+    from collections import Counter
     from pathlib import Path
     from typing import Optional, List, Set, Dict, Any, Tuple
 
-    # ---- Shadow-proof normalization of --sha
+    # -------------------------
+    # Normalize --sha
+    # -------------------------
     sha_values: Optional[List[str]]
     if sha is None:
         sha_values = None
@@ -601,7 +669,58 @@ def eb_stats(
         sha_values = [str(sha)]
 
     # -------------------------
-    # Helpers
+    # OS helpers
+    # -------------------------
+    HA_ENV_TO_OS = {
+        140: "windows",
+        330: "linux",
+        430: "macos",
+    }
+
+    def _os_from_environment_id(environment_id) -> str:
+        if environment_id is None:
+            return "unknown"
+
+        try:
+            environment_id = int(environment_id)
+        except (TypeError, ValueError):
+            return "unknown"
+
+        return HA_ENV_TO_OS.get(environment_id, "unknown")
+
+    def _sha_to_target_os_from_db(db) -> dict[str, str]:
+        """
+        Build a mapping:
+          sha256 -> target_os
+
+        The OS is derived from the Hybrid Analysis environment_id stored
+        in the submissions table.
+        """
+        out: dict[str, str] = {}
+
+        rows = db.list_submissions()
+
+        for r in rows:
+            try:
+                service = r["service"]
+                sha256 = r["sha256"]
+            except Exception:
+                continue
+
+            if str(service).lower() != "hybridanalysis":
+                continue
+
+            try:
+                environment_id = r["environment_id"]
+            except Exception:
+                environment_id = None
+
+            out[str(sha256)] = _os_from_environment_id(environment_id)
+
+        return out
+
+    # -------------------------
+    # General helpers
     # -------------------------
     def code_key(c: str):
         m = re.search(r"(\d+)$", c)
@@ -618,12 +737,15 @@ def eb_stats(
         p = Path(path_str)
         if not p.exists():
             raise FileNotFoundError(f"sha-list file not found: {p}")
+
         out: Set[str] = set()
+
         for line in p.read_text(encoding="utf-8").splitlines():
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
             out.add(s)
+
         return out
 
     def sanitize_folder_name(s: str) -> str:
@@ -635,15 +757,21 @@ def eb_stats(
     def load_code_mappings() -> Dict[str, str]:
         resources_dir = Path("src/resources").resolve()
         p = resources_dir / "code_mappings.json"
+
         if not p.exists():
             raise FileNotFoundError(f"Missing mapping file: {p}")
+
         data = json.loads(p.read_text(encoding="utf-8"))
+
         if not isinstance(data, builtins.dict):
-            raise ValueError("code_mappings.json must be a JSON object (EB_NAME -> ESB_CODE).")
+            raise ValueError("code_mappings.json must be a JSON object: EB_NAME -> ESB_CODE.")
+
         out: Dict[str, str] = {}
+
         for k, v in data.items():
             if isinstance(k, str) and isinstance(v, str) and v.strip():
                 out[k.strip()] = v.strip()
+
         return out
 
     def canonical_esb_codes() -> List[str]:
@@ -653,9 +781,12 @@ def eb_stats(
     def load_custom_requirements_codes_from_file(path_str: str) -> List[str]:
         if not path_str:
             return []
+
         p = Path(path_str)
+
         if not p.exists():
             raise FileNotFoundError(f"Requirements file not found: {p}")
+
         data = json.loads(p.read_text(encoding="utf-8"))
 
         if isinstance(data, builtins.list):
@@ -670,8 +801,9 @@ def eb_stats(
     def load_eb_file(eb_path: Path) -> Dict[str, Any]:
         return json.loads(eb_path.read_text(encoding="utf-8"))
 
-    def write_text_table(path: Path, headers: List[str], rows: List[Dict[str, Any]]):
+    def write_text_table(path: Path, headers: List[str], rows: List[Dict[str, Any]]) -> None:
         colw = {h: len(h) for h in headers}
+
         for r in rows:
             for h in headers:
                 colw[h] = max(colw[h], len(str(r.get(h, ""))))
@@ -679,6 +811,7 @@ def eb_stats(
         lines = []
         lines.append("  ".join(h.ljust(colw[h]) for h in headers))
         lines.append("-" * (sum(colw.values()) + 2 * (len(headers) - 1)))
+
         for r in rows:
             lines.append("  ".join(str(r.get(h, "")).ljust(colw[h]) for h in headers))
 
@@ -690,6 +823,7 @@ def eb_stats(
     # -------------------------
     rep_dir = Path(reports_dir)
     eb_dir = rep_dir / "eb"
+
     if not eb_dir.exists():
         typer.echo(f"EB directory not found: {eb_dir}. Run 'toolbehave eb-all' first.")
         raise typer.Exit(code=1)
@@ -699,11 +833,12 @@ def eb_stats(
     single_all_codes = esb_codes + req_codes_for_single
 
     # -------------------------
-    # SINGLE SAMPLE MODE (unchanged behaviour: writes files, no console spam)
+    # SINGLE SAMPLE MODE
     # -------------------------
     if sha_single:
         target = sha_single.strip()
         eb_path = eb_dir / f"eb_{target}.json"
+
         if not eb_path.exists():
             typer.echo(f"Missing EB file for sha: {target}")
             typer.echo(f"Expected: {eb_path}")
@@ -724,23 +859,29 @@ def eb_stats(
         for e in ebs:
             if not isinstance(e, builtins.dict):
                 continue
+
             code = e.get("code")
             if not isinstance(code, str) or not code.strip():
                 continue
+
             srcs = e.get("sources_triggered") or []
             if not isinstance(srcs, builtins.list):
                 srcs = []
+
             present[code.strip()] = set(str(s) for s in srcs)
 
         for r_ in reqs:
             if not isinstance(r_, builtins.dict):
                 continue
+
             code = r_.get("code")
             if not isinstance(code, str) or not code.strip():
                 continue
+
             srcs = r_.get("sources_triggered") or []
             if not isinstance(srcs, builtins.list):
                 srcs = []
+
             present[code.strip()] = set(str(s) for s in srcs)
 
         single_dir = rep_dir / "plots" / "single" / target[:10]
@@ -751,46 +892,67 @@ def eb_stats(
 
         def mitre_counts(item: Dict[str, Any]) -> Tuple[int, int]:
             mm = item.get("matched_mitre") or {}
+
             if not isinstance(mm, builtins.dict):
                 return 0, 0
+
             ha_m = mm.get("hybridanalysis") or []
             vt_m = mm.get("virustotal") or []
+
             ha_n = len(ha_m) if isinstance(ha_m, builtins.list) else 0
             vt_n = len(vt_m) if isinstance(vt_m, builtins.list) else 0
+
             return ha_n, vt_n
 
         for e in ebs:
             if not isinstance(e, builtins.dict):
                 continue
+
             code = str(e.get("code") or "").strip()
             if not code:
                 continue
+
             srcs = e.get("sources_triggered") or []
             if not isinstance(srcs, builtins.list):
                 srcs = []
+
             ha_n, vt_n = mitre_counts(e)
-            rows.append({"code": code, "type": "EB", "sources": ",".join(str(s) for s in srcs), "ha_mitre_n": ha_n, "vt_mitre_n": vt_n})
+
+            rows.append(
+                {
+                    "code": code,
+                    "type": "EB",
+                    "sources": ",".join(str(s) for s in srcs),
+                    "ha_mitre_n": ha_n,
+                    "vt_mitre_n": vt_n,
+                }
+            )
 
         for r_ in reqs:
             if not isinstance(r_, builtins.dict):
                 continue
+
             code = str(r_.get("code") or "").strip()
             if not code:
                 continue
+
             srcs = r_.get("sources_triggered") or []
             if not isinstance(srcs, builtins.list):
                 srcs = []
+
             ha_n, vt_n = mitre_counts(r_)
-            rows.append({"code": code, "type": "REQ", "sources": ",".join(str(s) for s in srcs), "ha_mitre_n": ha_n, "vt_mitre_n": vt_n})
 
-        def sort_key(code: str):
-            if code.startswith("ESB"):
-                return (0, code_key(code))
-            if code.startswith("R"):
-                return (1, code_key(code))
-            return (2, code)
+            rows.append(
+                {
+                    "code": code,
+                    "type": "REQ",
+                    "sources": ",".join(str(s) for s in srcs),
+                    "ha_mitre_n": ha_n,
+                    "vt_mitre_n": vt_n,
+                }
+            )
 
-        rows.sort(key=lambda r: sort_key(str(r["code"])))
+        rows.sort(key=lambda r: sort_key_code(str(r["code"])))
 
         table_path = single_dir / "single_table.txt"
         write_text_table(table_path, headers, rows)
@@ -798,42 +960,36 @@ def eb_stats(
         try:
             import matplotlib.pyplot as plt  # type: ignore
         except Exception:
-            typer.echo(f"Wrote single outputs (no matplotlib for PNG):\n- {table_path}")
+            typer.echo(f"Wrote single outputs, but matplotlib is not available for PNG:\n- {table_path}")
             raise typer.Exit(code=0)
 
-        colnames = ["HybridAnalysis", "VirusTotal"]
-        # --- Build row codes for the PNG matrix ---
-        # Always include ESB canonici
         row_codes = list(esb_codes)
 
-        # Add requirements codes found in the eb_<sha>.json (robust even if --requirements not passed to eb-stats)
         req_codes_in_file = []
         for r_ in reqs:
-            if isinstance(r_, dict):
+            if isinstance(r_, builtins.dict):
                 c = r_.get("code")
                 if isinstance(c, str) and c.strip():
                     req_codes_in_file.append(c.strip())
 
-        # keep order: R1, R2, ...
         def _rkey(c: str):
-            import re
             m = re.search(r"(\d+)$", c)
-            return int(m.group(1)) if m else 10 ** 9
+            return int(m.group(1)) if m else 10**9
 
         req_codes_in_file = sorted(set(req_codes_in_file), key=_rkey)
-
         row_codes.extend(req_codes_in_file)
 
-        # --- Build matrix rows using row_codes ---
         matrix_rows = []
+
         for code in row_codes:
             srcs = present.get(code, set())
-            matrix_rows.append([
-                "X" if "hybridanalysis" in srcs else "",
-                "X" if "virustotal" in srcs else "",
-            ])
+            matrix_rows.append(
+                [
+                    "X" if "hybridanalysis" in srcs else "",
+                    "X" if "virustotal" in srcs else "",
+                ]
+            )
 
-        # --- Render table ---
         fig, ax = plt.subplots(figsize=(6, max(4, 0.35 * len(row_codes))), dpi=160)
         ax.axis("off")
 
@@ -841,29 +997,6 @@ def eb_stats(
             cellText=matrix_rows,
             rowLabels=row_codes,
             colLabels=["HybridAnalysis", "VirusTotal"],
-            cellLoc="center",
-            rowLoc="center",
-            loc="center",
-        )
-        tbl.auto_set_font_size(False)
-        tbl.set_fontsize(10)
-        tbl.scale(1.0, 1.2)
-
-        ax.set_title(f"EB/Requirements presence matrix - {target[:10]}", pad=12)
-
-        out_png = single_dir / "single_presence_matrix.png"
-        plt.tight_layout()
-        plt.savefig(out_png, bbox_inches="tight")
-        plt.close()
-
-        plt.rcParams.update({"font.size": 10, "axes.titlesize": 12})
-        fig, ax = plt.subplots(figsize=(6, max(4, 0.35 * len(row_codes))), dpi=160)
-        ax.axis("off")
-
-        tbl = ax.table(
-            cellText=matrix_rows,
-            rowLabels=row_codes,  # <-- FIX: labels must match matrix_rows
-            colLabels=colnames,
             cellLoc="center",
             rowLoc="center",
             loc="center",
@@ -884,7 +1017,7 @@ def eb_stats(
         raise typer.Exit(code=0)
 
     # -------------------------
-    # AGGREGATE MODE (ALL or SUBSET)
+    # AGGREGATE MODE
     # -------------------------
     filter_set: Set[str] = set()
 
@@ -902,6 +1035,7 @@ def eb_stats(
             raise typer.Exit(code=1)
 
     eb_paths = sorted(eb_dir.glob("eb_*.json"))
+
     if filter_set:
         eb_paths = [p for p in eb_paths if p.stem.replace("eb_", "", 1) in filter_set]
 
@@ -919,15 +1053,16 @@ def eb_stats(
         scope_name = "all"
         scope_desc = "ALL"
 
-    # If user provided --requirements in aggregate mode: filter to that schema hash
     schema_filter_hash: str = ""
     schema_filter_name: str = ""
+
     if requirements:
         meta = _requirements_fingerprint(requirements)
         schema_filter_hash = str(meta.get("sha256") or "")
         schema_filter_name = str(meta.get("name") or "")
 
     loaded: List[Tuple[Path, Dict[str, Any]]] = []
+
     for p in eb_paths:
         try:
             d = load_eb_file(p)
@@ -937,16 +1072,24 @@ def eb_stats(
 
         if schema_filter_hash:
             rs = d.get("requirements_schema") or {}
-            if not (isinstance(rs, builtins.dict) and rs.get("enabled") and str(rs.get("sha256") or "") == schema_filter_hash):
+            if not (
+                isinstance(rs, builtins.dict)
+                and rs.get("enabled")
+                and str(rs.get("sha256") or "") == schema_filter_hash
+            ):
                 continue
 
         loaded.append((p, d))
 
     if not loaded:
         if schema_filter_hash:
-            typer.echo(f"No EB files match the requested requirements schema: {schema_filter_name} ({schema_filter_hash[:12]})")
+            typer.echo(
+                f"No EB files match the requested requirements schema: "
+                f"{schema_filter_name} ({schema_filter_hash[:12]})"
+            )
         else:
             typer.echo("No valid EB files found after loading.")
+
         raise typer.Exit(code=0)
 
     # -------------------------
@@ -958,13 +1101,15 @@ def eb_stats(
         typer.echo("matplotlib not available. Install with: pip install matplotlib")
         raise typer.Exit(code=0)
 
-    plt.rcParams.update({
-        "font.size": 10,
-        "axes.titlesize": 12,
-        "axes.labelsize": 10,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-    })
+    plt.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.titlesize": 12,
+            "axes.labelsize": 10,
+            "xtick.labelsize": 9,
+            "ytick.labelsize": 9,
+        }
+    )
 
     C_HA = "#1F77B4"
     C_VT = "#FF7F0E"
@@ -982,76 +1127,253 @@ def eb_stats(
         include_requirements: bool,
         req_codes_hint: List[str],
     ) -> Tuple[List[str], Dict[str, Dict[str, int]], int]:
-        """
-        Returns:
-          labels,
-          agg map {code: {ha,vt,both,total}},
-          total_samples (LEN(items)) -> IMPORTANT denominator for percentages
-        """
         total_samples = len(items)
+
         if total_samples <= 0:
             return [], {}, 0
 
         codes: List[str] = list(esb_codes)
+
         if include_requirements:
             codes += list(req_codes_hint)
 
-        agg: Dict[str, Dict[str, int]] = {c: {"ha": 0, "vt": 0, "both": 0, "total": 0} for c in codes}
+        agg: Dict[str, Dict[str, int]] = {
+            c: {"ha": 0, "vt": 0, "both": 0, "total": 0} for c in codes
+        }
 
         for _p, d in items:
             ebs = d.get("equivocal_behaviours") or []
+
             if isinstance(ebs, builtins.list):
                 for e in ebs:
                     if not isinstance(e, builtins.dict):
                         continue
+
                     code = e.get("code")
                     if not isinstance(code, str) or not code.strip():
                         continue
+
                     code = code.strip()
+
                     if code not in agg:
                         agg[code] = {"ha": 0, "vt": 0, "both": 0, "total": 0}
 
                     srcs = e.get("sources_triggered") or []
                     if not isinstance(srcs, builtins.list):
                         srcs = []
+
                     has_ha = "hybridanalysis" in srcs
                     has_vt = "virustotal" in srcs
+
                     agg[code]["total"] += 1
+
                     if has_ha:
                         agg[code]["ha"] += 1
+
                     if has_vt:
                         agg[code]["vt"] += 1
+
                     if has_ha and has_vt:
                         agg[code]["both"] += 1
 
             if include_requirements:
                 reqs = d.get("requirements") or []
+
                 if isinstance(reqs, builtins.list):
                     for r_ in reqs:
                         if not isinstance(r_, builtins.dict):
                             continue
+
                         code = r_.get("code")
                         if not isinstance(code, str) or not code.strip():
                             continue
+
                         code = code.strip()
+
                         if code not in agg:
                             agg[code] = {"ha": 0, "vt": 0, "both": 0, "total": 0}
 
                         srcs = r_.get("sources_triggered") or []
                         if not isinstance(srcs, builtins.list):
                             srcs = []
+
                         has_ha = "hybridanalysis" in srcs
                         has_vt = "virustotal" in srcs
+
                         agg[code]["total"] += 1
+
                         if has_ha:
                             agg[code]["ha"] += 1
+
                         if has_vt:
                             agg[code]["vt"] += 1
+
                         if has_ha and has_vt:
                             agg[code]["both"] += 1
 
         labels = sorted(set(agg.keys()), key=sort_key_code)
         return labels, agg, total_samples
+
+    def build_stats_rows(
+        labels: List[str],
+        agg: Dict[str, Dict[str, int]],
+        total_samples: int,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build tabular statistics for CSV/TXT outputs.
+
+        Counts:
+          ha_count      = samples where the code was triggered by HybridAnalysis
+          vt_count      = samples where the code was triggered by VirusTotal
+          both_count    = samples where both sources triggered the same code
+          ha_only_count = samples where only HybridAnalysis triggered the code
+          vt_only_count = samples where only VirusTotal triggered the code
+
+        Percentages use total_samples as denominator.
+        """
+        rows: List[Dict[str, Any]] = []
+
+        for code in labels:
+            ha_count = int(agg.get(code, {}).get("ha", 0))
+            vt_count = int(agg.get(code, {}).get("vt", 0))
+            both_count = int(agg.get(code, {}).get("both", 0))
+
+            ha_only_count = max(0, ha_count - both_count)
+            vt_only_count = max(0, vt_count - both_count)
+
+            if total_samples > 0:
+                ha_pct = ha_count / total_samples * 100.0
+                vt_pct = vt_count / total_samples * 100.0
+                both_pct = both_count / total_samples * 100.0
+                ha_only_pct = ha_only_count / total_samples * 100.0
+                vt_only_pct = vt_only_count / total_samples * 100.0
+            else:
+                ha_pct = 0.0
+                vt_pct = 0.0
+                both_pct = 0.0
+                ha_only_pct = 0.0
+                vt_only_pct = 0.0
+
+            rows.append(
+                {
+                    "code": code,
+                    "total_samples": total_samples,
+                    "ha_count": ha_count,
+                    "vt_count": vt_count,
+                    "both_count": both_count,
+                    "ha_only_count": ha_only_count,
+                    "vt_only_count": vt_only_count,
+                    "ha_pct": round(ha_pct, 4),
+                    "vt_pct": round(vt_pct, 4),
+                    "both_pct": round(both_pct, 4),
+                    "ha_only_pct": round(ha_only_pct, 4),
+                    "vt_only_pct": round(vt_only_pct, 4),
+                }
+            )
+
+        return rows
+
+    def write_stats_tables(
+        labels: List[str],
+        agg: Dict[str, Dict[str, int]],
+        total_samples: int,
+        out_dir: Path,
+        title_prefix: str,
+    ) -> None:
+        """
+        Write CSV and TXT summary next to the PNG plots.
+        """
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        rows = build_stats_rows(labels, agg, total_samples)
+
+        count_fields = [
+            "code",
+            "total_samples",
+            "ha_count",
+            "vt_count",
+            "both_count",
+            "ha_only_count",
+            "vt_only_count",
+        ]
+
+        pct_fields = [
+            "code",
+            "total_samples",
+            "ha_pct",
+            "vt_pct",
+            "both_pct",
+            "ha_only_pct",
+            "vt_only_pct",
+        ]
+
+        all_fields = [
+            "code",
+            "total_samples",
+            "ha_count",
+            "vt_count",
+            "both_count",
+            "ha_only_count",
+            "vt_only_count",
+            "ha_pct",
+            "vt_pct",
+            "both_pct",
+            "ha_only_pct",
+            "vt_only_pct",
+        ]
+
+        counts_path = out_dir / "eb_stats_counts.csv"
+        percentages_path = out_dir / "eb_stats_percentages.csv"
+        summary_path = out_dir / "eb_stats_summary.txt"
+
+        with counts_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=count_fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in count_fields})
+
+        with percentages_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=pct_fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in pct_fields})
+
+        # Human-readable compact summary
+        top_ha = sorted(rows, key=lambda r: r["ha_count"], reverse=True)[:10]
+        top_vt = sorted(rows, key=lambda r: r["vt_count"], reverse=True)[:10]
+        top_both = sorted(rows, key=lambda r: r["both_count"], reverse=True)[:10]
+
+        lines: List[str] = []
+        lines.append(f"Scope: {title_prefix}")
+        lines.append(f"Total samples: {total_samples}")
+        lines.append(f"Total codes: {len(labels)}")
+        lines.append("")
+        lines.append("Generated files:")
+        lines.append(f"- {counts_path.name}")
+        lines.append(f"- {percentages_path.name}")
+        lines.append("")
+        lines.append("Top codes by HybridAnalysis count:")
+        for r in top_ha:
+            lines.append(f"- {r['code']}: {r['ha_count']} ({r['ha_pct']}%)")
+        lines.append("")
+        lines.append("Top codes by VirusTotal count:")
+        for r in top_vt:
+            lines.append(f"- {r['code']}: {r['vt_count']} ({r['vt_pct']}%)")
+        lines.append("")
+        lines.append("Top codes by agreement count:")
+        for r in top_both:
+            lines.append(f"- {r['code']}: {r['both_count']} ({r['both_pct']}%)")
+        lines.append("")
+
+        summary_path.write_text("\n".join(lines), encoding="utf-8")
+
+        # Optional complete all-in-one CSV for convenience
+        all_path = out_dir / "eb_stats_full.csv"
+        with all_path.open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=all_fields)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in all_fields})
 
     def plot_4(
         labels: List[str],
@@ -1061,6 +1383,7 @@ def eb_stats(
         title_prefix: str,
     ) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
+
         if total_samples <= 0:
             return
 
@@ -1085,10 +1408,29 @@ def eb_stats(
 
         def plot_hist(values_ha, values_vt, ylabel, title, outfile: Path):
             plt.figure(figsize=(14, 5), dpi=140)
-            plt.bar([xi - width / 2 for xi in x], values_ha, width=width, label="HybridAnalysis",
-                    color=C_HA, alpha=ALPHA, edgecolor=EDGE, linewidth=0.6)
-            plt.bar([xi + width / 2 for xi in x], values_vt, width=width, label="VirusTotal",
-                    color=C_VT, alpha=ALPHA, edgecolor=EDGE, linewidth=0.6)
+
+            plt.bar(
+                [xi - width / 2 for xi in x],
+                values_ha,
+                width=width,
+                label="HybridAnalysis",
+                color=C_HA,
+                alpha=ALPHA,
+                edgecolor=EDGE,
+                linewidth=0.6,
+            )
+
+            plt.bar(
+                [xi + width / 2 for xi in x],
+                values_vt,
+                width=width,
+                label="VirusTotal",
+                color=C_VT,
+                alpha=ALPHA,
+                edgecolor=EDGE,
+                linewidth=0.6,
+            )
+
             plt.xticks(x, labels, rotation=0)
             plt.tick_params(axis="x", pad=8)
             plt.xlabel("Codes (ESB / R)")
@@ -1104,13 +1446,42 @@ def eb_stats(
 
         def plot_agreement(values_ha_only, values_vt_only, values_both, ylabel, title, outfile: Path):
             plt.figure(figsize=(14, 5), dpi=140)
-            plt.bar(x, values_ha_only, label="HA-only", color=C_HA_ONLY, alpha=ALPHA, edgecolor=EDGE, linewidth=0.6)
+
+            plt.bar(
+                x,
+                values_ha_only,
+                label="HA-only",
+                color=C_HA_ONLY,
+                alpha=ALPHA,
+                edgecolor=EDGE,
+                linewidth=0.6,
+            )
+
             bottoms = [values_ha_only[i] for i in range(len(x))]
-            plt.bar(x, values_vt_only, bottom=bottoms, label="VT-only",
-                    color=C_VT_ONLY, alpha=ALPHA, edgecolor=EDGE, linewidth=0.6)
+
+            plt.bar(
+                x,
+                values_vt_only,
+                bottom=bottoms,
+                label="VT-only",
+                color=C_VT_ONLY,
+                alpha=ALPHA,
+                edgecolor=EDGE,
+                linewidth=0.6,
+            )
+
             bottoms2 = [bottoms[i] + values_vt_only[i] for i in range(len(x))]
-            plt.bar(x, values_both, bottom=bottoms2, label="Both",
-                    color=C_BOTH, alpha=ALPHA, edgecolor=EDGE, linewidth=0.6)
+
+            plt.bar(
+                x,
+                values_both,
+                bottom=bottoms2,
+                label="Both",
+                color=C_BOTH,
+                alpha=ALPHA,
+                edgecolor=EDGE,
+                linewidth=0.6,
+            )
 
             plt.xticks(x, labels, rotation=0)
             plt.tick_params(axis="x", pad=8)
@@ -1125,62 +1496,50 @@ def eb_stats(
             plt.savefig(outfile)
             plt.close()
 
-        # IMPORTANT: titles contain n=<total_samples>
         plot_hist(
-            ha_pct, vt_pct,
+            ha_pct,
+            vt_pct,
             "Percent of samples",
             f"{title_prefix} (n={total_samples}) - Frequency by source",
-            out_dir / "eb_hist_pct.png"
+            out_dir / "eb_hist_pct.png",
         )
+
         plot_hist(
-            ha_cnt, vt_cnt,
+            ha_cnt,
+            vt_cnt,
             "Count of samples",
             f"{title_prefix} (n={total_samples}) - Frequency by source",
-            out_dir / "eb_hist_counts.png"
+            out_dir / "eb_hist_counts.png",
         )
+
         plot_agreement(
-            ha_only_pct, vt_only_pct, both_pct,
+            ha_only_pct,
+            vt_only_pct,
+            both_pct,
             "Percent of samples",
             f"{title_prefix} (n={total_samples}) - Agreement by source",
-            out_dir / "eb_agreement_pct.png"
+            out_dir / "eb_agreement_pct.png",
         )
+
         plot_agreement(
-            ha_only_cnt, vt_only_cnt, both_cnt,
+            ha_only_cnt,
+            vt_only_cnt,
+            both_cnt,
             "Count of samples",
             f"{title_prefix} (n={total_samples}) - Agreement by source",
-            out_dir / "eb_agreement_counts.png"
+            out_dir / "eb_agreement_counts.png",
         )
 
     # -------------------------
-    # Output base: aggregate/<scope>/
+    # Schema helpers
     # -------------------------
-    base_out = rep_dir / "plots" / "aggregate" / scope_name
-
-    # 1) ESB-only plots always (use current scope loaded -> denominator = len(loaded))
-    labels_all, agg_all, n_all = aggregate_counts(
-        loaded,
-        include_requirements=False,
-        req_codes_hint=[],
-    )
-    out_all = base_out / "all"
-    plot_4(labels_all, agg_all, n_all, out_all, title_prefix=f"{scope_desc} | ESB-only")
-
-    # -------------------------
-    # Requirements plotting rules
-    # -------------------------
-    # Full dataset (no subset filters): can generate one folder per schema.
-    # Subset (via --sha/--sha-list): generate requirements plots ONLY if schema is unique and shared by ALL items.
-    is_subset_mode = bool(filter_set) or bool(sha_list) or bool(schema_filter_hash)
-
-    # compute schema distribution over loaded
     def schema_key_for(d: Dict[str, Any]) -> str:
         rs = d.get("requirements_schema") or {}
+
         if isinstance(rs, builtins.dict) and rs.get("enabled") and rs.get("sha256"):
             return str(rs.get("sha256"))
-        return ""  # empty means "no schema"
 
-    schema_hashes = [schema_key_for(d) for _, d in loaded]
-    unique_schema_hashes = sorted(set(h for h in schema_hashes if h))
+        return ""
 
     def schema_folder_from_meta(rs: Dict[str, Any]) -> str:
         name = str(rs.get("name") or "requirements.json")
@@ -1188,68 +1547,216 @@ def eb_stats(
         stem = sanitize_folder_name(Path(name).stem)
         return f"req_{stem}__{h}"
 
-    wrote_schema_groups = 0
+    def write_aggregate_outputs(
+        items: List[Tuple[Path, Dict[str, Any]]],
+        base_out: Path,
+        local_scope_desc: str,
+        local_is_subset_mode: bool,
+    ) -> Tuple[Path, int]:
+        """
+        Writes ESB-only plots and, when coherent, requirements plots.
+        Returns:
+          out_all path,
+          number of requirements schema folders written.
+        """
+        labels_all, agg_all, n_all = aggregate_counts(
+            items,
+            include_requirements=False,
+            req_codes_hint=[],
+        )
 
-    if is_subset_mode:
-        # In subset mode: requirements plots only if ALL have SAME non-empty schema hash
-        if len(unique_schema_hashes) == 1 and all(h == unique_schema_hashes[0] for h in schema_hashes):
-            wanted = unique_schema_hashes[0]
-            # group items by that schema
-            items = [(p, d) for (p, d) in loaded if schema_key_for(d) == wanted]
-            # meta from first
-            rs = (items[0][1].get("requirements_schema") or {}) if items else {}
-            if isinstance(rs, builtins.dict) and rs.get("enabled") and rs.get("sha256"):
+        out_all = base_out / "all"
+
+        plot_4(
+            labels_all,
+            agg_all,
+            n_all,
+            out_all,
+            title_prefix=f"{local_scope_desc} | ESB-only",
+        )
+        write_stats_tables(
+            labels_all,
+            agg_all,
+            n_all,
+            out_all,
+            title_prefix=f"{local_scope_desc} | ESB-only",
+        )
+        schema_hashes = [schema_key_for(d) for _, d in items]
+        unique_schema_hashes = sorted(set(h for h in schema_hashes if h))
+
+        wrote_schema_groups = 0
+
+        if local_is_subset_mode:
+            if len(unique_schema_hashes) == 1 and all(h == unique_schema_hashes[0] for h in schema_hashes):
+                wanted = unique_schema_hashes[0]
+                schema_items = [(p, d) for (p, d) in items if schema_key_for(d) == wanted]
+
+                rs = (schema_items[0][1].get("requirements_schema") or {}) if schema_items else {}
+
+                if isinstance(rs, builtins.dict) and rs.get("enabled") and rs.get("sha256"):
+                    nreq = int(rs.get("count") or 0)
+                    req_codes = [f"R{i}" for i in range(1, nreq + 1)] if nreq > 0 else []
+
+                    labels_g, agg_g, n_g = aggregate_counts(
+                        schema_items,
+                        include_requirements=True,
+                        req_codes_hint=req_codes,
+                    )
+
+                    out_g = base_out / schema_folder_from_meta(rs)
+
+                    plot_4(
+                        labels_g,
+                        agg_g,
+                        n_g,
+                        out_g,
+                        title_prefix=f"{local_scope_desc} | {rs.get('name', 'requirements')}",
+                    )
+                    write_stats_tables(
+                        labels_g,
+                        agg_g,
+                        n_g,
+                        out_g,
+                        title_prefix=f"{local_scope_desc} | {rs.get('name', 'requirements')}",
+                    )
+
+                    wrote_schema_groups += 1
+            else:
+                c = Counter(schema_hashes)
+                parts = []
+
+                for k, v in c.items():
+                    if not k:
+                        parts.append(f"no_schema={v}")
+                    else:
+                        parts.append(f"{k[:12]}={v}")
+
+                typer.echo(
+                    "WARNING: Mixed or missing requirements schemas in this subset. "
+                    "ESB-only plots were generated, but requirements plots are skipped. "
+                    f"Scope={local_scope_desc}. "
+                    f"Schema distribution: {', '.join(parts)}"
+                )
+        else:
+            groups: Dict[str, List[Tuple[Path, Dict[str, Any]]]] = {}
+            metas: Dict[str, Dict[str, Any]] = {}
+
+            for p, d in items:
+                rs = d.get("requirements_schema") or {}
+
+                if isinstance(rs, builtins.dict) and rs.get("enabled") and rs.get("sha256"):
+                    h = str(rs.get("sha256"))
+                    groups.setdefault(h, []).append((p, d))
+                    metas[h] = rs
+
+            for h, schema_items in groups.items():
+                rs = metas.get(h) or {}
                 nreq = int(rs.get("count") or 0)
                 req_codes = [f"R{i}" for i in range(1, nreq + 1)] if nreq > 0 else []
 
-                labels_g, agg_g, n_g = aggregate_counts(items, include_requirements=True, req_codes_hint=req_codes)
-                out_g = base_out / schema_folder_from_meta(rs)
-                plot_4(labels_g, agg_g, n_g, out_g, title_prefix=f"{scope_desc} | {rs.get('name','requirements')}")
-                wrote_schema_groups += 1
-        else:
-            # WARNING + skip requirements plots
-            # build counts for message
-            from collections import Counter
-            c = Counter(schema_hashes)
-            # c[""] = no schema
-            parts = []
-            for k, v in c.items():
-                if not k:
-                    parts.append(f"no_schema={v}")
-                else:
-                    parts.append(f"{k[:12]}={v}")
-            typer.echo(
-                "WARNING: Mixed or missing requirements schemas in this subset. "
-                "EB-only plots were generated, but requirements plots are skipped. "
-                f"Schema distribution: {', '.join(parts)}"
-            )
-    else:
-        # FULL dataset (no subset): generate one folder per schema found
-        # group by schema sha256
-        groups: Dict[str, List[Tuple[Path, Dict[str, Any]]]] = {}
-        metas: Dict[str, Dict[str, Any]] = {}
-        for p, d in loaded:
-            rs = d.get("requirements_schema") or {}
-            if isinstance(rs, builtins.dict) and rs.get("enabled") and rs.get("sha256"):
-                h = str(rs.get("sha256"))
-                groups.setdefault(h, []).append((p, d))
-                metas[h] = rs
+                labels_g, agg_g, n_g = aggregate_counts(
+                    schema_items,
+                    include_requirements=True,
+                    req_codes_hint=req_codes,
+                )
 
-        for h, items in groups.items():
-            rs = metas.get(h) or {}
-            nreq = int(rs.get("count") or 0)
-            req_codes = [f"R{i}" for i in range(1, nreq + 1)] if nreq > 0 else []
-            labels_g, agg_g, n_g = aggregate_counts(items, include_requirements=True, req_codes_hint=req_codes)
-            out_g = base_out / schema_folder_from_meta(rs)
-            plot_4(labels_g, agg_g, n_g, out_g, title_prefix=f"{scope_desc} | {rs.get('name','requirements')}")
-            wrote_schema_groups += 1
+                out_g = base_out / schema_folder_from_meta(rs)
+
+                plot_4(
+                    labels_g,
+                    agg_g,
+                    n_g,
+                    out_g,
+                    title_prefix=f"{local_scope_desc} | {rs.get('name', 'requirements')}",
+                )
+                write_stats_tables(
+                    labels_g,
+                    agg_g,
+                    n_g,
+                    out_g,
+                    title_prefix=f"{local_scope_desc} | {rs.get('name', 'requirements')}",
+                )
+
+                wrote_schema_groups += 1
+
+        return out_all, wrote_schema_groups
+
+    # -------------------------
+    # Global aggregate
+    # -------------------------
+    is_subset_mode = bool(filter_set) or bool(sha_list) or bool(schema_filter_hash)
+
+    base_out = rep_dir / "plots" / "aggregate" / scope_name
+
+    out_all, wrote_schema_groups = write_aggregate_outputs(
+        loaded,
+        base_out,
+        scope_desc,
+        is_subset_mode,
+    )
 
     typer.echo(f"Samples used: {len(loaded)} | Scope: {scope_desc}")
     typer.echo(f"Wrote ESB-only plots: {out_all}")
+
     if wrote_schema_groups:
         typer.echo(f"Wrote requirements plots: {base_out} (folders: {wrote_schema_groups})")
     else:
-        typer.echo("No requirements plots written (none found or skipped due to mixed schemas).")
+        typer.echo("No requirements plots written for global aggregate.")
+
+    # -------------------------
+    # OS-specific aggregate
+    # -------------------------
+    if by_os:
+        try:
+            orch = build_orchestrator()
+            sha_to_os = _sha_to_target_os_from_db(orch.db)
+        except Exception as e:
+            typer.echo(f"WARNING: Could not load OS mapping from DB. Skipping --by-os. Reason: {e}")
+            raise typer.Exit(code=0)
+
+        grouped_by_os: Dict[str, List[Tuple[Path, Dict[str, Any]]]] = {
+            "windows": [],
+            "linux": [],
+            "macos": [],
+            "unknown": [],
+        }
+
+        for p, d in loaded:
+            item_sha = p.stem.replace("eb_", "", 1)
+            target_os = sha_to_os.get(item_sha, "unknown")
+            grouped_by_os.setdefault(target_os, []).append((p, d))
+
+        wrote_any_os = False
+
+        for target_os, os_items in grouped_by_os.items():
+            if not os_items:
+                continue
+
+            wrote_any_os = True
+
+            os_base_out = rep_dir / "plots" / "aggregate" / "by_os" / target_os
+            os_scope_desc = f"{scope_desc} | OS={target_os}"
+
+            os_out_all, os_schema_groups = write_aggregate_outputs(
+                os_items,
+                os_base_out,
+                os_scope_desc,
+                is_subset_mode,
+            )
+
+            typer.echo(
+                f"Wrote OS-specific ESB-only plots: {os_out_all} "
+                f"(os={target_os}, n={len(os_items)})"
+            )
+
+            if os_schema_groups:
+                typer.echo(
+                    f"Wrote OS-specific requirements plots: {os_base_out} "
+                    f"(os={target_os}, folders={os_schema_groups})"
+                )
+
+        if not wrote_any_os:
+            typer.echo("WARNING: --by-os requested, but no OS-specific groups were generated.")
 
 
 
@@ -1259,29 +1766,43 @@ def run(
     reports_dir: str = typer.Option("reports", "--reports-dir", help="Base reports directory."),
     poll_every: int = typer.Option(10, "--poll-every", help="Polling interval seconds."),
     timeout_sec: int = typer.Option(900, "--timeout", help="Max seconds to wait for BOTH providers."),
-    force: bool = typer.Option(False, "--force", help="Regenerate raw/normalized/enriched/eb for this sha."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Force resubmission and regenerate raw/normalized/enriched/eb outputs. "
+            "Without --force, the command reuses DB submissions and existing output files when possible."
+        ),
+    ),
     requirements: str = typer.Option("", "--requirements", help="Optional custom requirements JSON."),
 ):
     """
-    Full pipeline for ONE file:
-      1) submit to VT + HA
-      2) poll until BOTH COMPLETED (or timeout)
-      3) write raw/<sha>
-      4) write normalized/<sha>
-      5) write enriched/<sha> + eb/<sha>
+    Full pipeline for ONE file.
 
-    Output:
-      reports/raw/raw_<sha>.json
-      reports/normalized/normalized_<sha>.json
-      reports/enriched/enriched_<sha>.json
-      reports/eb/eb_<sha>.json
+    Default behavior:
+      1) compute SHA256
+      2) reuse existing VT/HA submissions from DB when available
+      3) submit only missing/stale providers
+      4) poll until BOTH providers are COMPLETED
+      5) fetch raw reports
+      6) normalize
+      7) generate enriched + EB summary
+
+    With --force:
+      - resubmit to providers;
+      - overwrite raw/normalized/enriched/eb outputs.
     """
     import time
     from pathlib import Path
 
     sample_path = Path(path)
+
     if not sample_path.exists():
         typer.echo(f"File not found: {sample_path}")
+        raise typer.Exit(code=1)
+
+    if not sample_path.is_file():
+        typer.echo(f"Path is not a file: {sample_path}")
         raise typer.Exit(code=1)
 
     rep_dir = Path(reports_dir)
@@ -1290,11 +1811,23 @@ def run(
     sha256 = _sha256_of_file(sample_path)
     typer.echo(f"SHA256: {sha256}")
 
+    final_eb_path = rep_dir / "eb" / f"eb_{sha256}.json"
+
+    if final_eb_path.exists() and not force:
+        typer.echo(f"[SKIP] Final EB report already exists: {final_eb_path}")
+        typer.echo("Use --force to resubmit and regenerate outputs.")
+        raise typer.Exit(code=0)
+
     orch = build_orchestrator()
 
-    # 1) submit
-    asyncio.run(orch.submit(str(sample_path)))
-    typer.echo("Submitted to VT + HA.")
+    # 1) submit/resume
+    try:
+        asyncio.run(orch.submit(str(sample_path), force=force))
+    except RuntimeError as e:
+        typer.echo(f"[SKIP] {e}")
+        raise typer.Exit(code=0)
+
+    typer.echo("Submit/resume step completed.")
 
     # 2) poll loop
     start = time.time()
@@ -1304,6 +1837,18 @@ def run(
         asyncio.run(orch.poll_once(sha256))
 
         statuses = _statuses_for_sha(orch.db, sha256)
+
+        failed_services = [
+            service
+            for service, status in statuses.items()
+            if str(status).upper() in {"FAILED", "ERROR"}
+        ]
+
+        if failed_services:
+            typer.echo(f"Provider failed with terminal status: {failed_services}")
+            typer.echo(f"Last status: {statuses}")
+            raise typer.Exit(code=3)
+
         now = time.time()
 
         if now - last_print >= poll_every:
@@ -1331,8 +1876,14 @@ def run(
     norm_path = _normalize_one(sha256, rep_dir, force=force)
     typer.echo(f"Wrote normalized: {norm_path}")
 
-    # 5) EB enrichment + EB summary (includes optional requirements)
-    enr_path, eb_path = _eb_one(sha256, rep_dir, force=force, requirements=requirements)
+    # 5) EB enrichment + EB summary
+    enr_path, eb_path = _eb_one(
+        sha256,
+        rep_dir,
+        force=force,
+        requirements=requirements,
+    )
+
     typer.echo(f"Wrote enriched: {enr_path}")
     typer.echo(f"Wrote eb: {eb_path}")
 
@@ -1340,5 +1891,7 @@ def run(
 
 
 
+if __name__ == "__main__":
+    app()
 
 

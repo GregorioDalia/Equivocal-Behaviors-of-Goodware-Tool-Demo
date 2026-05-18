@@ -110,14 +110,14 @@ def load_eb_rules(resources_dir: Path | None = None) -> List[EBRule]:
     """
     Legge:
       - code_mappings.json (EB name -> ESB code)
-      - Comportamenti_Equivoci.json (EB name -> [Txxxx,])
+      - Equivocal_Behaviours.json (EB name -> [Txxxx,])
 
     e costruisce una lista di regole EB basate su ANY(MITRE).
     """
     res_dir = resources_dir or default_resources_dir()
 
     code_map_path = res_dir / "code_mappings.json"
-    eb_map_path = res_dir / "Comportamenti_Equivoci.json"
+    eb_map_path = res_dir / "Equivocal_Behaviours.json"
 
     if not code_map_path.exists():
         raise FileNotFoundError(f"Missing {code_map_path}")
@@ -130,7 +130,7 @@ def load_eb_rules(resources_dir: Path | None = None) -> List[EBRule]:
     if not isinstance(code_map, dict):
         raise ValueError("code_mappings.json must be a JSON object")
     if not isinstance(eb_map, dict):
-        raise ValueError("Comportamenti_Equivoci.json must be a JSON object")
+        raise ValueError("Equivocal_Behaviours.json must be a JSON object")
 
     rules: List[EBRule] = []
 
@@ -158,7 +158,7 @@ def load_eb_rules(resources_dir: Path | None = None) -> List[EBRule]:
 
 def load_requirement_rules(custom_requirements_path: Path) -> List[RequirementRule]:
     """
-    Carica un JSON custom con struttura uguale a Comportamenti_Equivoci.json:
+    Carica un JSON custom con struttura uguale a Equivocal_Behaviours.json:
       {
         "Nome requisito 1": ["T1059", ...],
         "Nome requisito 2": ["T1497", ...],
