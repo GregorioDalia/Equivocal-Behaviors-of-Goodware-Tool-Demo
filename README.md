@@ -28,17 +28,26 @@ BEHAVE encompasses five main software components:
 ```mermaid
 flowchart TD
     A[Software sample] --> B[SHA-256 computation]
-    B --> C[SQLite tracking database]
-    C --> D[VirusTotal]
-    C --> E[Hybrid Analysis]
-    D --> F[Raw provider reports]
-    E --> F
-    F --> G[Normalized reports]
-    G --> H[ESB and requirement mapping]
-    H --> I[Enriched reports]
-    H --> J[Per-sample ESB summaries]
-    J --> K[Aggregate statistics, CSV files, and plots]
-```
+    A --> C[Hybrid Analysis environment selection]
+    B --> D[Submission and resume orchestration]
+    C --> D
+    D <--> E[SQLite tracking database]
+
+    D --> F[VirusTotal]
+    D --> G[Hybrid Analysis]
+
+    F --> H[Raw provider reports]
+    G --> H
+    R[Existing raw provider reports] --> H
+
+    H --> I[Normalizer]
+    I --> J[Normalized reports]
+
+    J --> K[MITRE-based ESB and optional requirement mapping]
+    K --> L[Enriched reports]
+    K --> M[Per-sample ESB summaries]
+
+    M --> N[Aggregate statistics, CSV files, and plots]
 
 In general, BEHAVE supports two main execution modes:
 
@@ -367,7 +376,7 @@ BEHAVE also provides a local SQLite-based tracking mechanism to make submissions
 ## References
 
 If you use this tool in your research, please cite:
-
+[THIS IS è PLACEHOLDER]
 ```bibtex
 @inproceedings{behave2026,
   title     = {BEHAVE: amBiguous and Equivocal beHAviors Verification Engine},
