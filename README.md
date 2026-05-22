@@ -66,7 +66,7 @@ The recommended path for reproducing an analysis is the replication mode, becaus
 The detailed technical documentation is available in:
 
 ```text
-docs/TECHNICAL_GUIDE.md
+Guide.md
 ```
 
 ## Using Command Line Interface
