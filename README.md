@@ -29,8 +29,10 @@ BEHAVE encompasses five main software components:
 flowchart TD
     A[Software sample] --> B[SHA-256 computation]
     A --> C[Hybrid Analysis environment selection]
+
     B --> D[Submission and resume orchestration]
     C --> D
+
     D <--> E[SQLite tracking database]
 
     D --> F[VirusTotal]
@@ -38,16 +40,21 @@ flowchart TD
 
     F --> H[Raw provider reports]
     G --> H
+
     R[Existing raw provider reports] --> H
 
-    H --> I[Normalizer]
+    H --> I[Report normalizer]
     I --> J[Normalized reports]
 
-    J --> K[MITRE-based ESB and optional requirement mapping]
+    J --> K[MITRE-based ESB and custom requirement mapping]
+
     K --> L[Enriched reports]
     K --> M[Per-sample ESB summaries]
 
-    M --> N[Aggregate statistics, CSV files, and plots]
+    M --> N[Aggregate statistics]
+    M --> O[CSV files]
+    M --> P[Plots]
+```
 
 In general, BEHAVE supports two main execution modes:
 
