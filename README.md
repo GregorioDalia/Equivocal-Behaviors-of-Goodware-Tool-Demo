@@ -1,8 +1,8 @@
-# BEHAVE: amBiguous and Equivocal beHAviours Verification Engine
+# BEHAVE: amBiguous and Equivocal beHAviors Verification Engine
 
 This repository contains the replication package and tool implementation for the paper:
 
-> **BEHAVE: amBiguous and Equivocal beHAviours Verification Engine**
+> **BEHAVE: amBiguous and Equivocal beHAviors Verification Engine**
 
 BEHAVE is a command-line tool for collecting, normalizing, enriching, and analyzing behavioural evidence produced by malware-analysis sandboxes and file-reputation services. The tool supports empirical studies on **equivocal behaviours**: behaviours that are not necessarily malicious in isolation, but that may be security-relevant, ambiguous, or context-dependent when observed during software execution or static/dynamic analysis.
 
