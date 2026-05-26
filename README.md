@@ -384,7 +384,7 @@ BEHAVE also provides a local SQLite-based tracking mechanism to make submissions
 
 The replication package includes a short video walkthrough showing how BEHAVE is installed and executed, how an end-to-end analysis is launched on a new sample, and how the tool regenerates normalized reports, enriched reports, compact ESB profiles, and aggregate statistics from existing artifacts.
 
-[Watch the BEHAVE demo video](media/BEHAVE_replication_package_demo.mp4)
+[Watch the BEHAVE demo video](media/BEHAVE_replication_package_demo_720p_h264.mp4)
 ## References
 
 If you use this tool in your research, please cite:
