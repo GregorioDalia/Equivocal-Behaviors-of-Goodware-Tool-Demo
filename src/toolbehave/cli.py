@@ -1447,37 +1447,38 @@ def eb_stats(
         def plot_agreement(values_ha_only, values_vt_only, values_both, ylabel, title, outfile: Path):
             plt.figure(figsize=(14, 5), dpi=140)
 
+            # Show provider agreement as three side-by-side bars per code.
+            # Order: Hybrid Analysis only / Both providers / VirusTotal only.
+            agreement_width = 0.28
+
             plt.bar(
-                x,
+                [xi - agreement_width for xi in x],
                 values_ha_only,
-                label="HA-only",
+                width=agreement_width,
+                label="Hybrid Analysis only",
                 color=C_HA_ONLY,
                 alpha=ALPHA,
                 edgecolor=EDGE,
                 linewidth=0.6,
             )
 
-            bottoms = [values_ha_only[i] for i in range(len(x))]
-
             plt.bar(
                 x,
-                values_vt_only,
-                bottom=bottoms,
-                label="VT-only",
-                color=C_VT_ONLY,
+                values_both,
+                width=agreement_width,
+                label="Both",
+                color=C_BOTH,
                 alpha=ALPHA,
                 edgecolor=EDGE,
                 linewidth=0.6,
             )
 
-            bottoms2 = [bottoms[i] + values_vt_only[i] for i in range(len(x))]
-
             plt.bar(
-                x,
-                values_both,
-                bottom=bottoms2,
-                label="Both",
-                color=C_BOTH,
+                [xi + agreement_width for xi in x],
+                values_vt_only,
+                width=agreement_width,
+                label="VirusTotal only",
+                color=C_VT_ONLY,
                 alpha=ALPHA,
                 edgecolor=EDGE,
                 linewidth=0.6,
